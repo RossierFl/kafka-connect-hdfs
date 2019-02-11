@@ -421,6 +421,11 @@ public class DataWriter {
 
   public void open(Collection<TopicPartition> partitions) {
     assignment = new HashSet<>(partitions);
+
+    if (hiveIntegration) {
+      syncWithHive();
+    }
+
     for (TopicPartition tp : assignment) {
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
