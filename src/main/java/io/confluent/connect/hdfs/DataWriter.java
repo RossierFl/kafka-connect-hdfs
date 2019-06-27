@@ -1,8 +1,9 @@
 /*
  * Copyright 2018 Confluent Inc.
  *
- * Licensed under the Confluent Community License; you may not use this file
- * except in compliance with the License.  You may obtain a copy of the License at
+ * Licensed under the Confluent Community License (the "License"); you may not use
+ * this file except in compliance with the License.  You may obtain a copy of the
+ * License at
  *
  * http://www.confluent.io/confluent-community-license
  *
@@ -60,6 +61,7 @@ import io.confluent.connect.hdfs.storage.Storage;
 import io.confluent.connect.storage.common.StorageCommonConfig;
 import io.confluent.connect.storage.format.SchemaFileReader;
 import io.confluent.connect.storage.hive.HiveConfig;
+import io.confluent.connect.storage.hive.HiveFactory;
 import io.confluent.connect.storage.partitioner.PartitionerConfig;
 
 public class DataWriter {
@@ -80,7 +82,6 @@ public class DataWriter {
   private io.confluent.connect.storage.format.Format<HdfsSinkConnectorConfig, Path> newFormat;
   private Set<TopicPartition> assignment;
   private Partitioner partitioner;
-  private Map<TopicPartition, Long> offsets;
   private HdfsSinkConnectorConfig connectorConfig;
   private AvroData avroData;
   private SinkTaskContext context;
@@ -279,7 +280,6 @@ public class DataWriter {
       partitioner = newPartitioner(connectorConfig);
 
       assignment = new HashSet<>(context.assignment());
-      offsets = new HashMap<>();
 
       hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
       if (hiveIntegration) {
@@ -289,7 +289,8 @@ public class DataWriter {
           hive = format.getHiveUtil(connectorConfig, hiveMetaStore);
         } else if (newFormat != null) {
           final io.confluent.connect.storage.hive.HiveUtil newHiveUtil
-              = newFormat.getHiveFactory().createHiveUtil(connectorConfig, hiveMetaStore);
+              = ((HiveFactory) newFormat.getHiveFactory())
+              .createHiveUtil(connectorConfig, hiveMetaStore);
           hive = new HiveUtil(connectorConfig, hiveMetaStore) {
             @Override
             public void createTable(
@@ -458,10 +459,10 @@ public class DataWriter {
         topicPartitionWriters.get(tp).close();
       } catch (ConnectException e) {
         log.error("Error closing writer for {}. Error: {}", tp, e.getMessage());
-      } finally {
-        topicPartitionWriters.remove(tp);
       }
     }
+    topicPartitionWriters.clear();
+    assignment.clear();
   }
 
   public void stop() {
@@ -502,9 +503,22 @@ public class DataWriter {
     return partitioner;
   }
 
+  /**
+   * By convention, the consumer stores the offset that corresponds to the next record to consume.
+   * To follow this convention, this methods returns each offset that is one more than the last
+   * offset committed to HDFS.
+   *
+   * @return Map from TopicPartition to next offset after the most recently committd offset to HDFS
+   */
   public Map<TopicPartition, Long> getCommittedOffsets() {
+    Map<TopicPartition, Long> offsets = new HashMap<>();
+    log.debug("Writer looking for last offsets for topic partitions {}", assignment);
     for (TopicPartition tp : assignment) {
-      offsets.put(tp, topicPartitionWriters.get(tp).offset());
+      long committedOffset = topicPartitionWriters.get(tp).offset();
+      log.debug("Writer found last offset {} for topic partition {}", committedOffset, tp);
+      if (committedOffset >= 0) {
+        offsets.put(tp, committedOffset);
+      }
     }
     return offsets;
   }

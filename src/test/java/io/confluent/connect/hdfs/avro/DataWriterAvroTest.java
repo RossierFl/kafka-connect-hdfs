@@ -1,8 +1,9 @@
 /*
  * Copyright 2018 Confluent Inc.
  *
- * Licensed under the Confluent Community License; you may not use this file
- * except in compliance with the License.  You may obtain a copy of the License at
+ * Licensed under the Confluent Community License (the "License"); you may not use
+ * this file except in compliance with the License.  You may obtain a copy of the
+ * License at
  *
  * http://www.confluent.io/confluent-community-license
  *
@@ -39,6 +40,7 @@ import io.confluent.connect.hdfs.HdfsSinkConnectorConfig;
 import io.confluent.connect.hdfs.TestWithMiniDFSCluster;
 import io.confluent.connect.hdfs.storage.HdfsStorage;
 import io.confluent.connect.hdfs.wal.WAL;
+import io.confluent.connect.storage.StorageSinkConnectorConfig;
 import io.confluent.connect.storage.hive.HiveConfig;
 import io.confluent.connect.storage.partitioner.PartitionerConfig;
 import io.confluent.connect.storage.partitioner.TimeBasedPartitioner;
@@ -172,7 +174,7 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
   }
 
   @Test
-  public void testGetPreviousOffsets() throws Exception {
+  public void testGetNextOffsets() throws Exception {
     String directory = TOPIC + "/" + "partition=" + String.valueOf(PARTITION);
     long[] startOffsets = {0, 3};
     long[] endOffsets = {2, 5};
@@ -194,8 +196,8 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
     Map<TopicPartition, Long> committedOffsets = hdfsWriter.getCommittedOffsets();
 
     assertTrue(committedOffsets.containsKey(TOPIC_PARTITION));
-    long previousOffset = committedOffsets.get(TOPIC_PARTITION);
-    assertEquals(previousOffset, 6L);
+    long nextOffset = committedOffsets.get(TOPIC_PARTITION);
+    assertEquals(6L, nextOffset);
 
     hdfsWriter.close();
     hdfsWriter.stop();
@@ -268,7 +270,7 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
   public void testProjectBackWard() throws Exception {
     Map<String, String> props = createProps();
     props.put(HdfsSinkConnectorConfig.FLUSH_SIZE_CONFIG, "2");
-    props.put(HiveConfig.SCHEMA_COMPATIBILITY_CONFIG, "BACKWARD");
+    props.put(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG, "BACKWARD");
     HdfsSinkConnectorConfig connectorConfig = new HdfsSinkConnectorConfig(props);
 
     DataWriter hdfsWriter = new DataWriter(connectorConfig, context, avroData);
@@ -308,7 +310,7 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
   public void testProjectForward() throws Exception {
     Map<String, String> props = createProps();
     props.put(HdfsSinkConnectorConfig.FLUSH_SIZE_CONFIG, "2");
-    props.put(HiveConfig.SCHEMA_COMPATIBILITY_CONFIG, "FORWARD");
+    props.put(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG, "FORWARD");
     HdfsSinkConnectorConfig connectorConfig = new HdfsSinkConnectorConfig(props);
 
     DataWriter hdfsWriter = new DataWriter(connectorConfig, context, avroData);
@@ -329,7 +331,7 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
   @Test
   public void testProjectNoVersion() throws Exception {
     Map<String, String> props = createProps();
-    props.put(HiveConfig.SCHEMA_COMPATIBILITY_CONFIG, "BACKWARD");
+    props.put(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG, "BACKWARD");
     HdfsSinkConnectorConfig connectorConfig = new HdfsSinkConnectorConfig(props);
 
     DataWriter hdfsWriter = new DataWriter(connectorConfig, context, avroData);
@@ -389,14 +391,14 @@ public class DataWriterAvroTest extends TestWithMiniDFSCluster {
     List<SinkRecord> sinkRecords = createSinkRecords(NUMBER_OF_RECORDS);
     hdfsWriter.write(sinkRecords);
 
+    // Wait so everything is committed
     time.sleep(WAIT_TIME);
-
     hdfsWriter.write(new ArrayList<SinkRecord>());
 
     Map<TopicPartition, Long> committedOffsets = hdfsWriter.getCommittedOffsets();
     assertTrue(committedOffsets.containsKey(TOPIC_PARTITION));
-    long previousOffset = committedOffsets.get(TOPIC_PARTITION);
-    assertEquals(NUMBER_OF_RECORDS, previousOffset);
+    long nextOffset = committedOffsets.get(TOPIC_PARTITION);
+    assertEquals(NUMBER_OF_RECORDS, nextOffset);
 
     hdfsWriter.close();
     hdfsWriter.stop();

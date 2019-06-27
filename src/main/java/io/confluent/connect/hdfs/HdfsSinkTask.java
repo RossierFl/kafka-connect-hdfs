@@ -1,8 +1,9 @@
 /*
  * Copyright 2018 Confluent Inc.
  *
- * Licensed under the Confluent Community License; you may not use this file
- * except in compliance with the License.  You may obtain a copy of the License at
+ * Licensed under the Confluent Community License (the "License"); you may not use
+ * this file except in compliance with the License.  You may obtain a copy of the
+ * License at
  *
  * http://www.confluent.io/confluent-community-license
  *
@@ -25,11 +26,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
 import io.confluent.connect.avro.AvroData;
+import io.confluent.connect.storage.StorageSinkConnectorConfig;
 import io.confluent.connect.storage.hive.HiveConfig;
 import io.confluent.connect.storage.partitioner.PartitionerConfig;
 import io.confluent.connect.storage.schema.StorageSchemaCompatibility;
@@ -55,7 +57,7 @@ public class HdfsSinkTask extends SinkTask {
       boolean hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
       if (hiveIntegration) {
         StorageSchemaCompatibility compatibility = StorageSchemaCompatibility.getCompatibility(
-            connectorConfig.getString(HiveConfig.SCHEMA_COMPATIBILITY_CONFIG)
+            connectorConfig.getString(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG)
         );
         if (compatibility == StorageSchemaCompatibility.NONE) {
           throw new ConfigException(
@@ -95,7 +97,8 @@ public class HdfsSinkTask extends SinkTask {
       }
     }
 
-    log.info("HDFS connector does not commit consumer offsets to Kafka. Upon startup, HDFS "
+    log.info("The connector relies on offsets in HDFS filenames, but does commit these offsets to "
+        + "Connect to enable monitoring progress of the HDFS connector. Upon startup, the HDFS "
         + "Connector restores offsets from filenames in HDFS. In the absence of files in HDFS, "
         + "the connector will attempt to find offsets for its consumer group in the "
         + "'__consumer_offsets' topic. If offsets are not found, the consumer will "
@@ -119,13 +122,20 @@ public class HdfsSinkTask extends SinkTask {
   public Map<TopicPartition, OffsetAndMetadata> preCommit(
       Map<TopicPartition, OffsetAndMetadata> currentOffsets
   ) {
-    // return an empty map so Connect doesn't commit offsets
-    return Collections.emptyMap();
-  }
-
-  @Override
-  public void flush(Map<TopicPartition, OffsetAndMetadata> offsets) {
-    // Do nothing as the connector manages the offset
+    // Although the connector manages offsets via files in HDFS, we still want to have Connect
+    // commit the consumer offsets for records this task has consumed from its topic partitions and
+    // committed to HDFS.
+    Map<TopicPartition, OffsetAndMetadata> result = new HashMap<>();
+    for (Map.Entry<TopicPartition, Long> entry : hdfsWriter.getCommittedOffsets().entrySet()) {
+      log.debug(
+          "Found last committed offset {} for topic partition {}",
+          entry.getValue(),
+          entry.getKey()
+      );
+      result.put(entry.getKey(), new OffsetAndMetadata(entry.getValue()));
+    }
+    log.debug("Returning committed offsets {}", result);
+    return result;
   }
 
   @Override

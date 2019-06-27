@@ -1,8 +1,9 @@
 /*
  * Copyright 2018 Confluent Inc.
  *
- * Licensed under the Confluent Community License; you may not use this file
- * except in compliance with the License.  You may obtain a copy of the License at
+ * Licensed under the Confluent Community License (the "License"); you may not use
+ * this file except in compliance with the License.  You may obtain a copy of the
+ * License at
  *
  * http://www.confluent.io/confluent-community-license
  *
@@ -59,6 +60,7 @@ import io.confluent.connect.storage.partitioner.PartitionerConfig;
 
 import static org.apache.kafka.common.utils.Time.SYSTEM;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class TopicPartitionWriterTest extends TestWithMiniDFSCluster {
@@ -181,17 +183,25 @@ public class TopicPartitionWriterTest extends TestWithMiniDFSCluster {
 
       }
     }
-    // Add a single records at the end of the batches sequence. Total records: 10
+    // Add a single records at the end of the batches sequence
     records.add(createRecord(schema));
+    assertEquals(10, records.size());
     List<SinkRecord> sinkRecords = createSinkRecords(records, schema);
 
     for (SinkRecord record : sinkRecords) {
       topicPartitionWriter.buffer(record);
     }
 
+    assertEquals(-1, topicPartitionWriter.offset());
+
     topicPartitionWriter.recover();
+    assertEquals(-1, topicPartitionWriter.offset());
     topicPartitionWriter.write();
+    // Flush size is 3, so records with offset 0-8 inclusive are written, and 9 is the next one
+    // after the last committed
+    assertEquals(9, topicPartitionWriter.offset());
     topicPartitionWriter.close();
+    assertEquals(9, topicPartitionWriter.offset());
 
     String directory1 = partitioner.generatePartitionedPath(TOPIC, partitionField + "=" + String.valueOf(16));
     String directory2 = partitioner.generatePartitionedPath(TOPIC, partitionField + "=" + String.valueOf(17));
@@ -204,6 +214,10 @@ public class TopicPartitionWriterTest extends TestWithMiniDFSCluster {
 
     int expectedBatchSize = 3;
     verify(expectedFiles, expectedBatchSize, records, schema);
+
+    // Try recovering at this point, and check that we've not lost our committed offsets
+    topicPartitionWriter.recover();
+    assertEquals(9, topicPartitionWriter.offset());
   }
 
   @Test
