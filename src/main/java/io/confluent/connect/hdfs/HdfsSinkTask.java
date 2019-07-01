@@ -82,9 +82,6 @@ public class HdfsSinkTask extends SinkTask {
       avroData = new AvroData(schemaCacheSize);
       hdfsWriter = new DataWriter(connectorConfig, context, avroData);
       recover(assignment);
-      if (hiveIntegration) {
-        syncWithHive();
-      }
     } catch (ConfigException e) {
       throw new ConnectException("Couldn't start HdfsSinkConnector due to configuration error.", e);
     } catch (ConnectException e) {
@@ -160,10 +157,6 @@ public class HdfsSinkTask extends SinkTask {
     for (TopicPartition tp : assignment) {
       hdfsWriter.recover(tp);
     }
-  }
-
-  private void syncWithHive() throws ConnectException {
-    hdfsWriter.syncWithHive();
   }
 
   public AvroData getAvroData() {
