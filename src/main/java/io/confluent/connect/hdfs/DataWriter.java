@@ -517,10 +517,17 @@ public class DataWriter {
     Map<TopicPartition, Long> offsets = new HashMap<>();
     log.debug("Writer looking for last offsets for topic partitions {}", assignment);
     for (TopicPartition tp : assignment) {
-      long committedOffset = topicPartitionWriters.get(tp).offset();
-      log.debug("Writer found last offset {} for topic partition {}", committedOffset, tp);
-      if (committedOffset >= 0) {
-        offsets.put(tp, committedOffset);
+      TopicPartitionWriter tpw = topicPartitionWriters.get(tp);
+      // As getCommittedOffsets might be called in parallel to open(TopicPartition) in this class
+      // it's possible that topicPartitionWriters.get(tp) is null if the Hive integration is still
+      // synchronizing the partitions
+      if (tpw != null) {
+        long committedOffset = tpw.offset();
+        log.debug("Writer found last offset {} for topic partition {}",
+            committedOffset, tp);
+        if (committedOffset >= 0) {
+          offsets.put(tp, committedOffset);
+        }
       }
     }
     return offsets;
