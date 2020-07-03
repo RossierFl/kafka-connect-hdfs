@@ -15,7 +15,6 @@
 
 package io.confluent.connect.hdfs;
 
-import org.apache.commons.collections.CollectionUtils;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.kafka.common.TopicPartition;
@@ -115,7 +114,7 @@ public class TopicPartitionWriter {
   private final HiveUtil hive;
   private final ExecutorService executorService;
   private final Queue<Future<Void>> hiveUpdateFutures;
-  private static final Set<String> hivePartitions = new HashSet<>();
+  private final Set<String> hivePartitions;
 
   public TopicPartitionWriter(
       TopicPartition tp,
@@ -235,6 +234,7 @@ public class TopicPartitionWriter {
     this.hive = hive;
     this.executorService = executorService;
     this.hiveUpdateFutures = hiveUpdateFutures;
+    hivePartitions = new HashSet<>();
 
     if (rotateScheduleIntervalMs > 0) {
       timeZone = DateTimeZone.forID(connectorConfig.getString(PartitionerConfig.TIMEZONE_CONFIG));
@@ -615,13 +615,9 @@ public class TopicPartitionWriter {
     }
 
     writers.put(encodedPartition, writer);
-    if (hiveIntegration) {
-      synchronized (hivePartitions) {
-        if (!hivePartitions.contains(encodedPartition)) {
-          addHivePartition(encodedPartition);
-          hivePartitions.add(encodedPartition);
-        }
-      }
+    if (hiveIntegration && !hivePartitions.contains(encodedPartition)) {
+      addHivePartition(encodedPartition);
+      hivePartitions.add(encodedPartition);
     }
     return writer;
   }
@@ -804,9 +800,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws HiveMetaStoreException {
         try {
-          log.info("[HIVE-TABLE-CREATE] Add Hive Table will be called {}",tp.topic());
           hive.createTable(hiveDatabase, tp.topic(), currentSchema, partitioner);
-          log.info("[HIVE-TABLE-CREATE] Add Hive Table success {}",tp.topic());
         } catch (Throwable e) {
           log.error("Creating Hive table threw unexpected error", e);
         }
@@ -822,7 +816,6 @@ public class TopicPartitionWriter {
       public Void call() throws HiveMetaStoreException {
         try {
           hive.alterSchema(hiveDatabase, tp.topic(), currentSchema);
-          Thread.sleep(5000);
         } catch (Throwable e) {
           log.error("Altering Hive schema threw unexpected error", e);
         }
@@ -837,20 +830,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws Exception {
         try {
-          if (context != null && CollectionUtils.isNotEmpty(context.assignment())) {
-            int smallerPartition = context.assignment().stream()
-                .map(TopicPartition::partition)
-                .min(Integer::compareTo)
-                .orElse(0);
-            try {
-              Thread.sleep(smallerPartition * 5000);
-            } catch (InterruptedException e) {
-              //nop
-            }
-          }
-          log.info("[HIVE-PARTITION] Add Hive Partition will be called {}",location);
           hiveMetaStore.addPartition(hiveDatabase, tp.topic(), location);
-          log.info("[HIVE-PARTITION] Add Hive Partition success {}",location);
         } catch (Throwable e) {
           log.error("Adding Hive partition threw unexpected error", e);
         }

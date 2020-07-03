@@ -15,7 +15,6 @@
 
 package io.confluent.connect.hdfs;
 
-import org.apache.commons.collections.CollectionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
@@ -379,7 +378,7 @@ public class DataWriter {
     topicPartitionWriters.get(tp).recover();
   }
 
-  public synchronized void syncWithHive() throws ConnectException {
+  public void syncWithHive() throws ConnectException {
     Set<String> topics = new HashSet<>();
     for (TopicPartition tp : assignment) {
       topics.add(tp.topic());
@@ -401,21 +400,14 @@ public class DataWriter {
               connectorConfig,
               path
           );
-          log.info("[HIVE-TABLE-CREATE-SYNC] Add Hive Table will be called {}",topic);
           hive.createTable(hiveDatabase, topic, latestSchema, partitioner);
-          log.info("[HIVE-TABLE-CREATE-SYNC] Add Hive Table success {}",topic);
-          log.info("[HIVE-LIST-PARTITION-SYNC] List Partition will be called {}",topic);
           List<String> partitions = hiveMetaStore.listPartitions(hiveDatabase, topic, (short) -1);
-          log.info("[HIVE-LIST-PARTITION-SYNC] List Partition succeed");
           FileStatus[] statuses = FileUtils.getDirectories(storage, new Path(topicDir));
           for (FileStatus status : statuses) {
             String location = status.getPath().toString();
             if (!partitions.contains(location)) {
-              log.info("[HIVE-PARTITION-SYNC] Partition {} does not exist",location);
               String partitionValue = getPartitionValue(location);
-              log.info("[HIVE-PARTITION-SYNC] Add Hive Partition will be called {}",location);
               hiveMetaStore.addPartition(hiveDatabase, topic, partitionValue);
-              log.info("[HIVE-PARTITION-SYNC] Add Hive Partition success {}",location);
             }
           }
         }
@@ -429,31 +421,6 @@ public class DataWriter {
     assignment = new HashSet<>(partitions);
 
     if (hiveIntegration) {
-      // This code aim to fix the race condition in the Hive Metastore that doesn't support
-      // concurrent calls when adding hive partitions
-      // https://jira.swisscom.com/browse/SBDS-1904
-      // a race condition is present in the metastore allowing such kind of workflow causing
-      // a corrupted hive partition
-      //    - T1 creates directory
-      //    - T1 paused
-      //    - T2 does not create directory but does create the partition
-      //    - T1 resumes after directory creation
-      //    - T1 submits its transaction to add the partition
-      //    - since partition was created by T2 before, this will fail
-      //    - T1 will delete the folder ( in it's logic, it was the one who created it )
-      // Bug as been open on Hive side but until it's resolve the fix are embedded here :
-      // https://issues.apache.org/jira/browse/HIVE-23437
-      if (CollectionUtils.isNotEmpty(assignment)) {
-        int smallerPartitionNumber = assignment.stream()
-            .map(TopicPartition::partition)
-            .min(Integer::compareTo)
-            .orElse(0);
-        try {
-          Thread.sleep(smallerPartitionNumber * 1000);
-        } catch (InterruptedException e) {
-          //nop
-        }
-      }
       syncWithHive();
     }
 
