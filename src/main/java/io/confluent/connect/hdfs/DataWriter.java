@@ -420,11 +420,9 @@ public class DataWriter {
   public synchronized void open(Collection<TopicPartition> partitions) {
     assignment = new HashSet<>(partitions);
 
-    if (hiveIntegration) {
-      syncWithHive();
-    }
-
     for (TopicPartition tp : assignment) {
+      context.pause(tp);
+
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
           storage,
@@ -442,6 +440,13 @@ public class DataWriter {
           time
       );
       topicPartitionWriters.put(tp, topicPartitionWriter);
+    }
+
+    if (hiveIntegration) {
+      syncWithHive();
+    }
+
+    for (TopicPartition tp : assignment) {
       // We need to immediately start recovery to ensure we pause consumption of messages for the
       // assigned topics while we try to recover offsets and rewind.
       recover(tp);
