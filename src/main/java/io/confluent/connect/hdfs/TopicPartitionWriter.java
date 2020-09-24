@@ -20,7 +20,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.ConnectException;
-import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.errors.IllegalWorkerStateException;
 import org.apache.kafka.connect.errors.SchemaProjectorException;
 import org.apache.kafka.connect.sink.SinkRecord;
@@ -53,7 +52,6 @@ import io.confluent.connect.hdfs.hive.HiveUtil;
 import io.confluent.connect.hdfs.partitioner.Partitioner;
 import io.confluent.connect.hdfs.storage.HdfsStorage;
 import io.confluent.connect.storage.StorageSinkConnectorConfig;
-import io.confluent.connect.storage.common.StorageCommonConfig;
 import io.confluent.connect.storage.hive.HiveConfig;
 import io.confluent.connect.storage.partitioner.PartitionerConfig;
 import io.confluent.connect.storage.partitioner.TimeBasedPartitioner;
@@ -189,7 +187,7 @@ public class TopicPartitionWriter {
     this.connectorConfig = storage.conf();
     this.schemaFileReader = schemaFileReader;
 
-    topicsDir = connectorConfig.getString(StorageCommonConfig.TOPICS_DIR_CONFIG);
+    topicsDir = connectorConfig.getTopicsDirFromTopic(tp.topic());
     flushSize = connectorConfig.getInt(HdfsSinkConnectorConfig.FLUSH_SIZE_CONFIG);
     rotateIntervalMs = connectorConfig.getLong(HdfsSinkConnectorConfig.ROTATE_INTERVAL_MS_CONFIG);
     rotateScheduleIntervalMs = connectorConfig.getLong(HdfsSinkConnectorConfig
@@ -198,7 +196,7 @@ public class TopicPartitionWriter {
     compatibility = StorageSchemaCompatibility.getCompatibility(
         connectorConfig.getString(StorageSinkConnectorConfig.SCHEMA_COMPATIBILITY_CONFIG));
 
-    String logsDir = connectorConfig.getString(HdfsSinkConnectorConfig.LOGS_DIR_CONFIG);
+    String logsDir = connectorConfig.getLogsDirFromTopic(tp.topic());
     wal = storage.wal(logsDir, tp);
 
     buffer = new LinkedList<>();
@@ -256,15 +254,19 @@ public class TopicPartitionWriter {
           pause();
           nextState();
         case RECOVERY_PARTITION_PAUSED:
+          log.debug("Start recovery state: Apply WAL for topic partition {}", tp);
           applyWAL();
           nextState();
         case WAL_APPLIED:
+          log.debug("Start recovery state: Truncate WAL for topic partition {}", tp);
           truncateWAL();
           nextState();
         case WAL_TRUNCATED:
+          log.debug("Start recovery state: Reset Offsets for topic partition {}", tp);
           resetOffsets();
           nextState();
         case OFFSET_RESET:
+          log.debug("Start recovery state: Resume for topic partition {}", tp);
           resume();
           nextState();
           log.info("Finished recovery for topic partition {}", tp);
@@ -410,24 +412,43 @@ public class TopicPartitionWriter {
       }
     }
     if (buffer.isEmpty()) {
-      // committing files after waiting for rotateIntervalMs time but less than flush.size
-      // records available
-      if (recordCounter > 0 && shouldRotateAndMaybeUpdateTimers(currentRecord, now)) {
-        log.info(
-            "committing files after waiting for rotateIntervalMs time but less than flush.size "
-                + "records available."
-        );
-        updateRotationTimers(currentRecord);
-
-        try {
-          closeTempFile();
-          appendToWAL();
-          commitFile();
-        } catch (ConnectException e) {
-          log.error("Exception on topic partition {}: ", tp, e);
-          failureTime = time.milliseconds();
-          setRetryTimeout(timeoutMs);
+      try {
+        switch (state) {
+          case WRITE_STARTED:
+            pause();
+            nextState();
+          case WRITE_PARTITION_PAUSED:
+            // committing files after waiting for rotateIntervalMs time but less than flush.size
+            // records available
+            if (recordCounter == 0 || !shouldRotateAndMaybeUpdateTimers(currentRecord, now)) {
+              break;
+            } 
+            
+            log.info(
+                  "committing files after waiting for rotateIntervalMs time but less than "
+                      + "flush.size records available."
+            );
+            nextState();
+          case SHOULD_ROTATE:
+            updateRotationTimers(currentRecord);
+            closeTempFile();
+            nextState();
+          case TEMP_FILE_CLOSED:
+            appendToWAL();
+            nextState();
+          case WAL_APPENDED:
+            commitFile();
+            nextState();
+          case FILE_COMMITTED:
+            break;
+          default:
+            log.error("{} is not a valid state to empty batch for topic partition {}.", state, tp);
         }
+      } catch (ConnectException e) {
+        log.error("Exception on topic partition {}: ", tp, e);
+        failureTime = time.milliseconds();
+        setRetryTimeout(timeoutMs);
+        return;
       }
 
       resume();
@@ -438,18 +459,31 @@ public class TopicPartitionWriter {
   public void close() throws ConnectException {
     log.debug("Closing TopicPartitionWriter {}", tp);
     List<Exception> exceptions = new ArrayList<>();
-    for (String encodedPartition : tempFiles.keySet()) {
+    for (String encodedPartition : writers.keySet()) {
+      log.debug(
+          "Discarding in progress tempfile {} for {} {}",
+          tempFiles.get(encodedPartition),
+          tp,
+          encodedPartition
+      );
+
       try {
-        if (writers.containsKey(encodedPartition)) {
-          log.debug("Discarding in progress tempfile {} for {} {}",
-              tempFiles.get(encodedPartition), tp, encodedPartition
-          );
-          closeTempFile(encodedPartition);
-          deleteTempFile(encodedPartition);
-        }
-      } catch (DataException e) {
+        closeTempFile(encodedPartition);
+      } catch (ConnectException e) {
         log.error(
-            "Error discarding temp file {} for {} {} when closing TopicPartitionWriter:",
+            "Error closing temp file {} for {} {} when closing TopicPartitionWriter:",
+            tempFiles.get(encodedPartition),
+            tp,
+            encodedPartition,
+            e
+        );
+      }
+
+      try {
+        deleteTempFile(encodedPartition);
+      } catch (ConnectException e) {
+        log.error(
+            "Error deleting temp file {} for {} {} when closing TopicPartitionWriter:",
             tempFiles.get(encodedPartition),
             tp,
             encodedPartition,
@@ -494,6 +528,10 @@ public class TopicPartitionWriter {
    */
   public long offset() {
     return offset;
+  }
+
+  public TopicPartition topicPartition() {
+    return tp;
   }
 
   Map<String, io.confluent.connect.storage.format.RecordWriter> getWriters() {
@@ -690,16 +728,57 @@ public class TopicPartitionWriter {
   }
 
   private void closeTempFile(String encodedPartition) {
-    if (writers.containsKey(encodedPartition)) {
-      io.confluent.connect.storage.format.RecordWriter writer = writers.get(encodedPartition);
+    // Here we remove the writer first, and then if non-null attempt to close it.
+    // This is the correct logic, because if `close()` throws an exception and fails, the task
+    // will catch this an ultimately retry writing the records in that topic partition.
+    // But to do so, we need to get a new `RecordWriter`, and `getWriter(...)` would only
+    // do that if there is no existing writer in the `writers` map.
+    // Plus, once a `writer.close()` method is called, per the `Closeable` contract we should
+    // not use it again. Therefore, it's actually better to remove the writer before
+    // trying to close it, even if the close attempt fails.
+    io.confluent.connect.storage.format.RecordWriter writer = writers.remove(encodedPartition);
+    if (writer != null) {
       writer.close();
-      writers.remove(encodedPartition);
     }
   }
 
   private void closeTempFile() {
+    ConnectException connectException = null;
     for (String encodedPartition : tempFiles.keySet()) {
-      closeTempFile(encodedPartition);
+      // Close the file and propagate any errors
+      try {
+        closeTempFile(encodedPartition);
+      } catch (ConnectException e) {
+        // still want to close all of the other data writers
+        connectException = e;
+        log.error(
+            "Failed to close temporary file for partition {}. The connector will attempt to"
+                + " rewrite the temporary file.",
+            encodedPartition
+        );
+      }
+    }
+
+    if (connectException != null) {
+      // at least one tmp file did not close properly therefore will try to recreate the tmp and
+      // delete all buffered records + tmp files and start over because otherwise there will be
+      // duplicates, since there is no way to reclaim the records in the tmp file.
+      for (String encodedPartition : tempFiles.keySet()) {
+        try {
+          deleteTempFile(encodedPartition);
+        } catch (ConnectException e) {
+          log.error("Failed to delete tmp file {}", tempFiles.get(encodedPartition), e);
+        }
+        startOffsets.remove(encodedPartition);
+        offsets.remove(encodedPartition);
+        buffer.clear();
+      }
+
+      log.debug("Resetting offset for {} to {}", tp, offset);
+      context.offset(tp, offset);
+
+      recordCounter = 0;
+      throw connectException;
     }
   }
 

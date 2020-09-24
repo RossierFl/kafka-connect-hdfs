@@ -69,10 +69,11 @@ public class DataWriter {
   private static final Time SYSTEM_TIME = new SystemTime();
   private final Time time;
 
-  private Map<TopicPartition, TopicPartitionWriter> topicPartitionWriters;
+  private final Map<TopicPartition, TopicPartitionWriter> topicPartitionWriters;
   private String url;
   private HdfsStorage storage;
-  private String topicsDir;
+  private HashMap<String, String> logDirs;
+  private HashMap<String, String> topicDirs;
   private Format format;
   private RecordWriterProvider writerProvider;
   private io.confluent.connect.storage.format.RecordWriterProvider<HdfsSinkConnectorConfig>
@@ -80,7 +81,6 @@ public class DataWriter {
   private io.confluent.connect.storage.format.SchemaFileReader<HdfsSinkConnectorConfig, Path>
       schemaFileReader;
   private io.confluent.connect.storage.format.Format<HdfsSinkConnectorConfig, Path> newFormat;
-  private Set<TopicPartition> assignment;
   private Partitioner partitioner;
   private HdfsSinkConnectorConfig connectorConfig;
   private AvroData avroData;
@@ -206,8 +206,7 @@ public class DataWriter {
         ticketRenewThread.start();
       }
 
-      url = connectorConfig.getString(HdfsSinkConnectorConfig.HDFS_URL_CONFIG);
-      topicsDir = connectorConfig.getString(StorageCommonConfig.TOPICS_DIR_CONFIG);
+      url = connectorConfig.getUrl();
 
       @SuppressWarnings("unchecked")
       Class<? extends HdfsStorage> storageClass = (Class<? extends HdfsStorage>) connectorConfig
@@ -219,10 +218,24 @@ public class DataWriter {
           url
       );
 
-      createDir(topicsDir);
-      createDir(topicsDir + HdfsSinkConnectorConstants.TEMPFILE_DIRECTORY);
-      String logsDir = connectorConfig.getString(HdfsSinkConnectorConfig.LOGS_DIR_CONFIG);
-      createDir(logsDir);
+      topicDirs = new HashMap<>();
+      for (TopicPartition tp : context.assignment()) {
+        topicDirs.computeIfAbsent(tp.topic(), top -> connectorConfig.getTopicsDirFromTopic(top));
+      }
+
+      for (String directory : topicDirs.values()) {
+        createDir(directory);
+        createDir(directory + HdfsSinkConnectorConstants.TEMPFILE_DIRECTORY);
+      }
+
+      logDirs = new HashMap<>();
+      for (TopicPartition tp : context.assignment()) {
+        logDirs.computeIfAbsent(tp.topic(), topic -> connectorConfig.getLogsDirFromTopic(topic));
+      }
+
+      for (String directory : logDirs.values()) {
+        createDir(directory);
+      }
 
       // Try to instantiate as a new-style storage-common type class, then fall back to old-style
       // with no parameters
@@ -279,8 +292,6 @@ public class DataWriter {
 
       partitioner = newPartitioner(connectorConfig);
 
-      assignment = new HashSet<>(context.assignment());
-
       hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
       if (hiveIntegration) {
         hiveDatabase = connectorConfig.getString(HiveConfig.HIVE_DATABASE_CONFIG);
@@ -313,7 +324,7 @@ public class DataWriter {
       }
 
       topicPartitionWriters = new HashMap<>();
-      for (TopicPartition tp : assignment) {
+      for (TopicPartition tp : context.assignment()) {
         TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
             tp,
             storage,
@@ -371,7 +382,7 @@ public class DataWriter {
       }
     }
 
-    for (TopicPartition tp : assignment) {
+    for (TopicPartition tp : topicPartitionWriters.keySet()) {
       topicPartitionWriters.get(tp).write();
     }
   }
@@ -382,13 +393,13 @@ public class DataWriter {
 
   public void syncWithHive() throws ConnectException {
     Set<String> topics = new HashSet<>();
-    for (TopicPartition tp : assignment) {
+    for (TopicPartition tp : topicPartitionWriters.keySet()) {
       topics.add(tp.topic());
     }
 
     try {
       for (String topic : topics) {
-        String topicDir = FileUtils.topicDirectory(url, topicsDir, topic);
+        String topicDir = FileUtils.topicDirectory(url, topicDirs.get(topic), topic);
         CommittedFileFilter filter = new TopicCommittedFileFilter(topic);
         FileStatus fileStatusWithMaxOffset = FileUtils.fileStatusWithMaxOffset(
             storage,
@@ -420,8 +431,7 @@ public class DataWriter {
   }
 
   public void open(Collection<TopicPartition> partitions) {
-    assignment = new HashSet<>(partitions);
-    for (TopicPartition tp : assignment) {
+    for (TopicPartition tp : partitions) {
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
           storage,
@@ -454,15 +464,17 @@ public class DataWriter {
     // data may have continued to be processed and we'd have to restart from the recovery stage,
     // make sure we apply the WAL, and only reuse the temp file if the starting offset is still
     // valid. For now, we prefer the simpler solution that may result in a bit of wasted effort.
-    for (TopicPartition tp : assignment) {
+    for (TopicPartitionWriter writer : topicPartitionWriters.values()) {
       try {
-        topicPartitionWriters.get(tp).close();
+        if (writer != null) {
+          // In some failure modes, the writer might not have been created for all assignments
+          writer.close();
+        }
       } catch (ConnectException e) {
-        log.error("Error closing writer for {}. Error: {}", tp, e.getMessage());
+        log.warn("Unable to close writer for topic partition {}: ", writer.topicPartition(), e);
       }
     }
     topicPartitionWriters.clear();
-    assignment.clear();
   }
 
   public void stop() {
@@ -512,8 +524,10 @@ public class DataWriter {
    */
   public Map<TopicPartition, Long> getCommittedOffsets() {
     Map<TopicPartition, Long> offsets = new HashMap<>();
-    log.debug("Writer looking for last offsets for topic partitions {}", assignment);
-    for (TopicPartition tp : assignment) {
+    log.debug("Writer looking for last offsets for topic partitions {}",
+        topicPartitionWriters.keySet()
+    );
+    for (TopicPartition tp : topicPartitionWriters.keySet()) {
       long committedOffset = topicPartitionWriters.get(tp).offset();
       log.debug("Writer found last offset {} for topic partition {}", committedOffset, tp);
       if (committedOffset >= 0) {

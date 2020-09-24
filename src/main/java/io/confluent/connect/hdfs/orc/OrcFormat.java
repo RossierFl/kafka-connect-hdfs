@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Confluent Inc.
+ * Copyright 2020 Confluent Inc.
  *
  * Licensed under the Confluent Community License (the "License"); you may not use
  * this file except in compliance with the License.  You may obtain a copy of the
@@ -13,42 +13,33 @@
  * specific language governing permissions and limitations under the License.
  */
 
-package io.confluent.connect.hdfs.avro;
+package io.confluent.connect.hdfs.orc;
 
-import org.apache.hadoop.fs.Path;
-
-import io.confluent.connect.avro.AvroData;
 import io.confluent.connect.hdfs.HdfsSinkConnectorConfig;
 import io.confluent.connect.hdfs.storage.HdfsStorage;
+import io.confluent.connect.storage.format.Format;
 import io.confluent.connect.storage.format.RecordWriterProvider;
 import io.confluent.connect.storage.format.SchemaFileReader;
 import io.confluent.connect.storage.hive.HiveFactory;
+import org.apache.hadoop.fs.Path;
 
-public class AvroFormat
-    implements io.confluent.connect.storage.format.Format<HdfsSinkConnectorConfig, Path> {
-  private final HdfsStorage storage;
-  private final AvroData avroData;
+public class OrcFormat implements Format<HdfsSinkConnectorConfig, Path> {
 
   // DO NOT change this signature, it is required for instantiation via reflection
-  public AvroFormat(HdfsStorage storage) {
-    this.storage = storage;
-    this.avroData = new AvroData(
-        storage.conf().getInt(HdfsSinkConnectorConfig.SCHEMA_CACHE_SIZE_CONFIG)
-    );
-  }
+  public OrcFormat(HdfsStorage storage) { }
 
   @Override
   public RecordWriterProvider<HdfsSinkConnectorConfig> getRecordWriterProvider() {
-    return new AvroRecordWriterProvider(storage, avroData);
+    return new OrcRecordWriterProvider();
   }
 
   @Override
   public SchemaFileReader<HdfsSinkConnectorConfig, Path> getSchemaFileReader() {
-    return new AvroFileReader(avroData);
+    return new OrcFileReader();
   }
 
   @Override
   public HiveFactory getHiveFactory() {
-    return new AvroHiveFactory(avroData);
+    return new OrcHiveFactory();
   }
 }

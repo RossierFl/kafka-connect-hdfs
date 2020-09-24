@@ -15,6 +15,15 @@
 
 package io.confluent.connect.hdfs;
 
+import io.confluent.connect.hdfs.orc.OrcFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+import io.confluent.connect.hdfs.parquet.ParquetFormat;
+import io.confluent.connect.hdfs.string.StringFormat;
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
@@ -52,6 +61,10 @@ import io.confluent.connect.storage.partitioner.TimeBasedPartitioner;
 import static io.confluent.connect.storage.common.StorageCommonConfig.STORAGE_CLASS_CONFIG;
 import static io.confluent.connect.storage.common.StorageCommonConfig.STORAGE_CLASS_DISPLAY;
 import static io.confluent.connect.storage.common.StorageCommonConfig.STORAGE_CLASS_DOC;
+import static io.confluent.connect.storage.common.StorageCommonConfig.TOPICS_DIR_CONFIG;
+import static io.confluent.connect.storage.common.StorageCommonConfig.TOPICS_DIR_DEFAULT;
+import static io.confluent.connect.storage.common.StorageCommonConfig.TOPICS_DIR_DISPLAY;
+import static io.confluent.connect.storage.common.StorageCommonConfig.TOPICS_DIR_DOC;
 
 public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
 
@@ -75,12 +88,31 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
   private static final String HADOOP_HOME_DOC = "The Hadoop home directory.";
   private static final String HADOOP_HOME_DISPLAY = "Hadoop home directory";
 
+  // Storage group
+  public static final String TOPIC_CAPTURE_GROUPS_REGEX_CONFIG = "topic.capture.groups.regex";
+  public static final String TOPIC_CAPTURE_GROUPS_REGEX_DISPLAY = "Topic Capture Groups Regex";
+  public static final String TOPIC_CAPTURE_GROUPS_REGEX_DOC = "A Java Pattern regex that matches "
+      + "the entire topic and captures values for substituting into ``topics.dir``. Indexed "
+      + "capture groups are accessible with ``${n}``, where ``${0}`` refers to the whole match and "
+      + "``${1}`` refers to the first capture group. Example config value of "
+      + "``([a-zA-Z]*)_([a-zA-Z]*)`` will match topics that are two words delimited by an "
+      + "underscore and will capture each word separately. With ``topic.dir = ${1}/${2}``, a "
+      + "record from the topic ``example_name`` will be written into a subdirectory of "
+      + "``example/name/``. By default, this functionality is not enabled.";
+  public static final String TOPIC_CAPTURE_GROUPS_REGEX_DEFAULT = null;
+
+  private static final String DIR_REGEX_DOC = " Supports ``${topic}`` in the value, which will be "
+      + "replaced by the actual topic name. Supports ``${0}``, ..., ``${n}`` in "
+      + "conjunction with " + TOPIC_CAPTURE_GROUPS_REGEX_CONFIG + ". See "
+      + TOPIC_CAPTURE_GROUPS_REGEX_CONFIG + " configuration documentation for details.";
+
+  // HDFS Group
   public static final String LOGS_DIR_CONFIG = "logs.dir";
   public static final String LOGS_DIR_DOC =
-      "Top level directory to store the write ahead logs.";
+      "Top level directory to store the write ahead logs." + DIR_REGEX_DOC;
   public static final String LOGS_DIR_DEFAULT = "logs";
   public static final String LOGS_DIR_DISPLAY = "Logs directory";
-
+  
   // Security group
   public static final String HDFS_AUTHENTICATION_KERBEROS_CONFIG = "hdfs.authentication.kerberos";
   private static final String HDFS_AUTHENTICATION_KERBEROS_DOC =
@@ -114,6 +146,9 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
   private static final String KERBEROS_TICKET_RENEW_PERIOD_MS_DISPLAY = "Kerberos Ticket Renew "
       + "Period (ms)";
 
+  private static final Pattern SUBSTITUTION_PATTERN = Pattern.compile("\\$\\{(\\d+)}");
+  private static final Pattern INVALID_SUB_PATTERN = Pattern.compile("\\$\\{.*}");
+
   private static final ConfigDef.Recommender hdfsAuthenticationKerberosDependentsRecommender =
       new BooleanParentRecommender(
           HDFS_AUTHENTICATION_KERBEROS_CONFIG);
@@ -130,7 +165,13 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
     );
 
     FORMAT_CLASS_RECOMMENDER.addValidValues(
-        Arrays.<Object>asList(AvroFormat.class, JsonFormat.class)
+        Arrays.<Object>asList(
+            AvroFormat.class,
+            JsonFormat.class,
+            OrcFormat.class,
+            ParquetFormat.class,
+            StringFormat.class
+        )
     );
 
     PARTITIONER_CLASS_RECOMMENDER.addValidValues(
@@ -281,19 +322,41 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
         FORMAT_CLASS_RECOMMENDER,
         AVRO_COMPRESSION_RECOMMENDER);
 
+    int lastOrder = 0;
+    String group = "Storage";
     for (ConfigDef.ConfigKey key : storageConfigDef.configKeys().values()) {
       configDef.define(key);
+      lastOrder = Math.max(key.orderInGroup, lastOrder);
     }
+
+    // add the topic.capture.groups.regex config to storage
+    configDef
+        .define(
+            TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+            Type.STRING,
+            TOPIC_CAPTURE_GROUPS_REGEX_DEFAULT,
+            Importance.LOW,
+            TOPIC_CAPTURE_GROUPS_REGEX_DOC,
+            group,
+            ++lastOrder,
+            Width.LONG,
+            TOPIC_CAPTURE_GROUPS_REGEX_DISPLAY
+    );
+
     return configDef;
   }
 
   private final String name;
+  private final String url;
   private final StorageCommonConfig commonConfig;
   private final HiveConfig hiveConfig;
   private final PartitionerConfig partitionerConfig;
+  private final Pattern topicRegexCaptureGroup;
   private final Map<String, ComposableConfig> propertyToConfig = new HashMap<>();
   private final Set<AbstractConfig> allConfigs = new HashSet<>();
   private Configuration hadoopConfig;
+  private int topicDirGroupsMaxIndex;
+  private int logDirGroupsMaxIndex;
 
   public HdfsSinkConnectorConfig(Map<String, String> props) {
     this(newConfigDef() , addDefaults(props));
@@ -312,6 +375,40 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
     addToGlobal(partitionerConfig);
     addToGlobal(commonConfig);
     addToGlobal(this);
+    this.url = extractUrl();
+    try {
+      String topicRegex = getString(TOPIC_CAPTURE_GROUPS_REGEX_CONFIG);
+      this.topicRegexCaptureGroup = topicRegex != null ? Pattern.compile(topicRegex) : null;
+    } catch (PatternSyntaxException e) {
+      throw new ConfigException(
+          TOPIC_CAPTURE_GROUPS_REGEX_CONFIG + " is an invalid regex pattern: ",
+          e
+      );
+    }
+
+    topicDirGroupsMaxIndex = getMaxIndexToReplace(getString(TOPICS_DIR_CONFIG));
+    logDirGroupsMaxIndex = getMaxIndexToReplace(getString(LOGS_DIR_CONFIG));
+
+    validateDirsAndRegex();
+    validateTimezone();
+  }
+
+  /**
+   * Validate the timezone with the rotate.schedule.interval.ms config,
+   * these need validation before use in the TopicPartitionWriter.
+   */
+  private void validateTimezone() {
+    String timezone = getString(PartitionerConfig.TIMEZONE_CONFIG);
+    long rotateScheduleIntervalMs = getLong(ROTATE_SCHEDULE_INTERVAL_MS_CONFIG);
+    if (rotateScheduleIntervalMs > 0 && timezone.isEmpty()) {
+      throw new ConfigException(
+          String.format(
+              "%s configuration must be set when using %s",
+              PartitionerConfig.TIMEZONE_CONFIG,
+              ROTATE_SCHEDULE_INTERVAL_MS_CONFIG
+          )
+      );
+    }
   }
 
   public static Map<String, String> addDefaults(Map<String, String> props) {
@@ -337,8 +434,34 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
     }
   }
 
+  /**
+   * Returns the url property. Preference is given to property <code>store.url</code> over
+   * <code>hdfs.url</code> because <code>hdfs.url</code> is deprecated.
+   *
+   * @return String url for HDFS
+   */
+  private String extractUrl() {
+    String storageUrl = getString(StorageCommonConfig.STORE_URL_CONFIG);
+    if (StringUtils.isNotBlank(storageUrl)) {
+      return storageUrl;
+    }
+
+    String hdfsUrl = getString(HDFS_URL_CONFIG);
+    if (StringUtils.isNotBlank(hdfsUrl)) {
+      return hdfsUrl;
+    }
+
+    throw new ConfigException(
+        String.format("Configuration %s cannot be empty.", StorageCommonConfig.STORE_URL_CONFIG)
+    );
+  }
+
   public String getName() {
     return name;
+  }
+
+  public String getUrl() {
+    return url;
   }
 
   @Override
@@ -359,7 +482,148 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
     for (AbstractConfig config : allConfigs) {
       map.putAll(config.values());
     }
+    // Include any additional properties not defined by the ConfigDef
+    // that custom partitioners might need
+    Map<String, ?> originals = originals();
+    for (String originalKey : originals.keySet()) {
+      if (!map.containsKey(originalKey)) {
+        map.put(originalKey, originals.get(originalKey));
+      }
+    }
+
     return map;
+  }
+
+  /**
+   * Performs all substitutions on `logs.dir` and calculates the final directory for a topic
+   *
+   * @param topic - String - the topic whose directory to find
+   * @return String - the directory name and path
+   */
+  public String getLogsDirFromTopic(String topic) {
+    return getDirFromTopic(getString(LOGS_DIR_CONFIG), topic, logDirGroupsMaxIndex);
+  }
+
+  /**
+   * Performs all substitutions on `topics.dir` and calculates the final directory for a topic
+   *
+   * @param topic - String - the topic whose directory to find
+   * @return String - the directory name and path
+   */
+  public String getTopicsDirFromTopic(String topic) {
+    return getDirFromTopic(getString(TOPICS_DIR_CONFIG), topic, topicDirGroupsMaxIndex);
+  }
+
+  /**
+   * Performs all substitutions and calculates the final directory for a topic
+   *
+   * @param dir - String - the directory to perform substitutions on
+   * @param topic - String - the topic whose directory to find
+   * @return String - the directory name and path
+   */
+  private String getDirFromTopic(String dir, String topic, int maxIndexParts) {
+    dir = dir.replace("${topic}", topic);
+
+    // only if configured
+    if (topicRegexCaptureGroup != null) {
+
+      // find all of the captured groups by the regex
+      Matcher matcher = topicRegexCaptureGroup.matcher(topic);
+      if (!matcher.matches()) {
+        throw new ConfigException(
+            TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+            topicRegexCaptureGroup.pattern(),
+            String.format("Topic %s does not fully match the specified regex.", topic)
+        );
+      }
+
+      // make sure that all references to captured groups actually exist
+      if (maxIndexParts > matcher.groupCount()) {
+        throw new ConfigException(
+            String.format(
+                "Topic %s must have at least %d capture groups using regex pattern %s, "
+                    + "but actually had %d capture groups.",
+                topic,
+                maxIndexParts,
+                topicRegexCaptureGroup.pattern(),
+                matcher.groupCount()
+            )
+        );
+      }
+
+      for (int index = 0; index < matcher.groupCount() + 1; index++) {
+        dir = dir.replace("${" + index + "}", matcher.group(index));
+      }
+    }
+
+    return dir;
+  }
+
+  /**
+   * Finds all instances of `${[0-9]+}` in a string and returns the maximum integer.
+   * @return int - largest number found in the regex pattern - -1 if none found
+   */
+  private int getMaxIndexToReplace(String string) {
+
+    List<Integer> toReplace = new ArrayList<>();
+    Matcher partsMatcher = SUBSTITUTION_PATTERN.matcher(string);
+
+    while (partsMatcher.find()) {
+      String part = partsMatcher.group();
+      if (!part.isEmpty() && partsMatcher.groupCount() == 1) {
+        toReplace.add(Integer.valueOf(partsMatcher.group(1))); // should be the first group
+      }
+    }
+
+    return toReplace.isEmpty() ? -1 : Collections.max(toReplace);
+  }
+
+  /**
+   * Validates that the `topics.dir`, `logs.dir`, and `topic.regex.capture.group` configs are all
+   * within valid ranges.
+   */
+  private void validateDirsAndRegex() {
+    if (topicDirGroupsMaxIndex >= 0 && topicRegexCaptureGroup == null) {
+      throw new ConfigException(
+          TOPICS_DIR_CONFIG + " cannot contain ${} without a valid "
+              + TOPIC_CAPTURE_GROUPS_REGEX_CONFIG + " being configured."
+      );
+    }
+
+    if (logDirGroupsMaxIndex >= 0 && topicRegexCaptureGroup == null) {
+      throw new ConfigException(
+          LOGS_DIR_CONFIG + " cannot contain ${} without a valid "
+              + TOPIC_CAPTURE_GROUPS_REGEX_CONFIG + " being configured."
+      );
+    }
+
+    validateReplacements(TOPICS_DIR_CONFIG);
+    validateReplacements(LOGS_DIR_CONFIG);
+  }
+
+  /**
+   * Validates that the config has no invalid substitutions
+   *
+   * @param config - String - the config to validate
+   */
+  private void validateReplacements(String config) {
+    // remove all valid ${} substitutions
+    Matcher partsMatcher = SUBSTITUTION_PATTERN.matcher(getString(config));
+    String dir = partsMatcher.replaceAll("").replace("${topic}", "");
+
+    // check for invalid ${} substitutions
+    Matcher invalidMatcher = INVALID_SUB_PATTERN.matcher(dir);
+    if (invalidMatcher.find()) {
+      throw new ConfigException(
+          String.format(
+              "%s: %s contains an invalid ${} substitution %s. Valid substitutions are ${topic} "
+                  + "and ${n} where n >= 0.",
+              config,
+              getString(config),
+              invalidMatcher.group()
+          )
+      );
+    }
   }
 
   private static class BooleanParentRecommender implements ConfigDef.Recommender {
@@ -386,6 +650,7 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
     Set<String> skip = new HashSet<>();
     skip.add(STORAGE_CLASS_CONFIG);
     skip.add(FORMAT_CLASS_CONFIG);
+    skip.add(TOPICS_DIR_CONFIG);
 
     // Order added is important, so that group order is maintained
     ConfigDef visible = new ConfigDef();
@@ -419,6 +684,18 @@ public class HdfsSinkConnectorConfig extends StorageSinkConnectorConfig {
         Width.NONE,
         FORMAT_CLASS_DISPLAY,
         FORMAT_CLASS_RECOMMENDER
+    );
+
+    visible.define(
+        TOPICS_DIR_CONFIG,
+        Type.STRING,
+        TOPICS_DIR_DEFAULT,
+        Importance.HIGH,
+        TOPICS_DIR_DOC + DIR_REGEX_DOC,
+        "Storage",
+        2,
+        Width.NONE,
+        TOPICS_DIR_DISPLAY
     );
 
     return visible;

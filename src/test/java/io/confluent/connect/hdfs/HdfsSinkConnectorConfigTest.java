@@ -15,6 +15,9 @@
 
 package io.confluent.connect.hdfs;
 
+import io.confluent.connect.hdfs.orc.OrcFormat;
+import io.confluent.connect.hdfs.parquet.ParquetFormat;
+import io.confluent.connect.hdfs.string.StringFormat;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.ConfigValue;
@@ -50,6 +53,127 @@ public class HdfsSinkConnectorConfigTest extends TestWithMiniDFSCluster {
   @Override
   public void setUp() throws Exception {
     super.setUp();
+  }
+
+  @Test
+  public void testValidRegexCaptureGroup() {
+    String topic = "topica";
+    String topicDir = "topic.another.${topic}.again";
+
+    properties.put(HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG, ".*");
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+
+    assertEquals(
+        topicDir.replace("${topic}", topic),
+        connectorConfig.getTopicsDirFromTopic(topic)
+    );
+  }
+
+  @Test
+  public void testTopicDirFromTopicParts() {
+    String topic = "a.b.c.d";
+    String topicDir = "${1}-${2}-${3}-${4}";
+
+    properties.put(
+        HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+        "([a-z])\\.([a-z])\\.([a-z])\\.([a-z])"
+    );
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+
+    assertEquals(
+        topic.replace(".", "-"),
+        connectorConfig.getTopicsDirFromTopic(topic)
+    );
+  }
+
+  @Test
+  public void testTopicDirCanContainNumber() {
+    String topic = "a.b.c.d";
+    String topicDir = "${1}-${2}-${3}-${4}-1000";
+
+    properties.put(
+        HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+        "([a-z])[\\.\\-_]([a-z])[\\.\\-_]([a-z])[\\.\\-_]([a-z])"
+    );
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+
+    assertEquals(
+        topic.replace(".", "-") + "-1000",
+        connectorConfig.getTopicsDirFromTopic(topic)
+    );
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testInvalidTopicDir() {
+    String topic = "a.b.c.d";
+    String topicDir = "${100}-${2}-${3}-${4}";
+
+    properties.put(
+        HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+        "([a-z])\\.([a-z])\\.([a-z])\\.([a-z])"
+    );
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+
+    connectorConfig.getTopicsDirFromTopic(topic);
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testInvalidTopicDirNegative() {
+    String topic = "a.b.c.d";
+    String topicDir = "${-1}-${2}-${3}-${4}";
+
+    properties.put(
+        HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG,
+        "([a-z])\\.([a-z])\\.([a-z])\\.([a-z])"
+    );
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+
+    connectorConfig.getTopicsDirFromTopic(topic);
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testInvalidRegexCaptureGroup() {
+    String topicDir = "topic.another.${topic}.again";
+
+    properties.put(HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG, "[a");
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testInvalidRegexCaptureGroupDoesntMatchTopic() {
+    String topic = "topica";
+    String topicDir = "topic.another.${topic}.again";
+
+    properties.put(HdfsSinkConnectorConfig.TOPIC_CAPTURE_GROUPS_REGEX_CONFIG, "[a-z]");
+    properties.put(StorageCommonConfig.TOPICS_DIR_CONFIG, topicDir);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+    connectorConfig.getTopicsDirFromTopic(topic);
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testUrlConfigMustBeNonEmpty() {
+    properties.remove(StorageCommonConfig.STORE_URL_CONFIG);
+    properties.remove(HdfsSinkConnectorConfig.HDFS_URL_CONFIG);
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+  }
+
+  @Test
+  public void testStorageCommonUrlPreferred() {
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+    assertEquals(url, connectorConfig.getUrl());
+  }
+
+  @Test
+  public void testHdfsUrlIsValid() {
+    connectorConfig = new HdfsSinkConnectorConfig(properties);
+    properties.remove(StorageCommonConfig.STORE_URL_CONFIG);
+    assertEquals(url, connectorConfig.getUrl());
   }
 
   @Test
@@ -89,12 +213,45 @@ public class HdfsSinkConnectorConfigTest extends TestWithMiniDFSCluster {
   }
 
   @Test
+  public void testValidTimezoneWithScheduleIntervalAccepted (){
+    properties.put(PartitionerConfig.TIMEZONE_CONFIG, "CET");
+    properties.put(HdfsSinkConnectorConfig.ROTATE_SCHEDULE_INTERVAL_MS_CONFIG, "30");
+    new HdfsSinkConnectorConfig(properties);
+  }
+
+  @Test(expected = ConfigException.class)
+  public void testEmptyTimezoneThrowsExceptionOnScheduleInterval() {
+    properties.put(PartitionerConfig.TIMEZONE_CONFIG, PartitionerConfig.TIMEZONE_DEFAULT);
+    properties.put(HdfsSinkConnectorConfig.ROTATE_SCHEDULE_INTERVAL_MS_CONFIG, "30");
+    new HdfsSinkConnectorConfig(properties);
+  }
+
+  @Test
+  public void testEmptyTimezoneExceptionMessage() {
+    properties.put(PartitionerConfig.TIMEZONE_CONFIG, PartitionerConfig.TIMEZONE_DEFAULT);
+    properties.put(HdfsSinkConnectorConfig.ROTATE_SCHEDULE_INTERVAL_MS_CONFIG, "30");
+    String expectedError =  String.format(
+        "%s configuration must be set when using %s",
+        PartitionerConfig.TIMEZONE_CONFIG,
+        HdfsSinkConnectorConfig.ROTATE_SCHEDULE_INTERVAL_MS_CONFIG
+    );
+    try {
+      new HdfsSinkConnectorConfig(properties);
+    } catch (ConfigException e) {
+      assertEquals(expectedError, e.getMessage());
+    }
+  }
+
+  @Test
   public void testRecommendedValues() throws Exception {
     List<Object> expectedStorageClasses = Arrays.<Object>asList(HdfsStorage.class);
 
     List<Object> expectedFormatClasses = Arrays.<Object>asList(
         AvroFormat.class,
-        JsonFormat.class
+        JsonFormat.class,
+        OrcFormat.class,
+        ParquetFormat.class,
+        StringFormat.class
     );
 
     List<Object> expectedPartitionerClasses = Arrays.<Object>asList(
