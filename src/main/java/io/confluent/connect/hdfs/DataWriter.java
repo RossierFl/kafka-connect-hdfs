@@ -430,8 +430,9 @@ public class DataWriter {
     }
   }
 
-  public void open(Collection<TopicPartition> partitions) {
+  public synchronized void open(Collection<TopicPartition> partitions) {
     for (TopicPartition tp : partitions) {
+      context.pause(tp);
       TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
           tp,
           storage,
@@ -449,13 +450,20 @@ public class DataWriter {
           time
       );
       topicPartitionWriters.put(tp, topicPartitionWriter);
+    }
+
+    if (hiveIntegration) {
+      syncWithHive();
+    }
+
+    for (TopicPartition tp : topicPartitionWriters.keySet()) {
       // We need to immediately start recovery to ensure we pause consumption of messages for the
       // assigned topics while we try to recover offsets and rewind.
       recover(tp);
     }
   }
 
-  public void close() {
+  public synchronized void close() {
     // Close any writers we have. We may get assigned the same partitions and end up duplicating
     // some effort since we'll have to reprocess those messages. It may be possible to hold on to
     // the TopicPartitionWriter and continue to use the temp file, but this can get significantly
@@ -528,10 +536,17 @@ public class DataWriter {
         topicPartitionWriters.keySet()
     );
     for (TopicPartition tp : topicPartitionWriters.keySet()) {
-      long committedOffset = topicPartitionWriters.get(tp).offset();
-      log.debug("Writer found last offset {} for topic partition {}", committedOffset, tp);
-      if (committedOffset >= 0) {
-        offsets.put(tp, committedOffset);
+      TopicPartitionWriter tpw = topicPartitionWriters.get(tp);
+      // As getCommittedOffsets might be called in parallel to open(TopicPartition) in this class
+      // it's possible that topicPartitionWriters.get(tp) is null if the Hive integration is still
+      // synchronizing the partitions
+      if (tpw != null) {
+        long committedOffset = tpw.offset();
+        log.debug("Writer found last offset {} for topic partition {}",
+            committedOffset, tp);
+        if (committedOffset >= 0) {
+          offsets.put(tp, committedOffset);
+        }
       }
     }
     return offsets;

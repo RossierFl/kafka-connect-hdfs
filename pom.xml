@@ -22,7 +22,7 @@
     <parent>
         <groupId>io.confluent</groupId>
         <artifactId>kafka-connect-storage-common-parent</artifactId>
-        <version>5.5.2-SNAPSHOT</version>
+        <version>5.5.1</version>
     </parent>
 
     <artifactId>kafka-connect-hdfs</artifactId>
@@ -53,7 +53,8 @@
     </scm>
 
     <properties>
-        <confluent.maven.repo>http://packages.confluent.io/maven/</confluent.maven.repo>
+        <confluent.maven.repo>https://artifactory.swisscom.com:443/confluent-maven-remote/</confluent.maven.repo>
+        <spring.maven.repo>https://artifactory.swisscom.com:443/spring-plugins/</spring.maven.repo>
         <hadoop.version>2.7.7</hadoop.version>
         <apacheds-jdbm1.version>2.0.0-M2</apacheds-jdbm1.version>
         <kafka.connect.maven.plugin.version>0.11.1</kafka.connect.maven.plugin.version>
@@ -64,6 +65,11 @@
             <id>confluent</id>
             <name>Confluent</name>
             <url>${confluent.maven.repo}</url>
+        </repository>
+        <repository>
+            <id>pentaho</id>
+            <name>Pentaho</name>
+            <url>${spring.maven.repo}</url>
         </repository>
     </repositories>
 
