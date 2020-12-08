@@ -52,7 +52,7 @@
     </scm>
 
     <properties>
-        <confluent.maven.repo>http://packages.confluent.io/maven/</confluent.maven.repo>
+        <confluent.maven.repo>https://artifactory.swisscom.com/confluent-maven-remote/</confluent.maven.repo>
         <apacheds-jdbm1.version>2.0.0-M2</apacheds-jdbm1.version>
         <kafka.connect.maven.plugin.version>0.11.1</kafka.connect.maven.plugin.version>
         <maven.release.plugin.version>2.5.3</maven.release.plugin.version>
@@ -70,6 +70,10 @@
             <id>confluent</id>
             <name>Confluent</name>
             <url>${confluent.maven.repo}</url>
+        </repository>
+        <repository>
+            <id>pentaho</id>
+            <url>https://artifactory.swisscom.com:443/spring-plugins/</url>
         </repository>
     </repositories>
 
