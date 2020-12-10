@@ -41,6 +41,8 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import io.confluent.common.utils.Time;
 import io.confluent.connect.avro.AvroData;
@@ -60,6 +62,11 @@ import io.confluent.connect.storage.schema.StorageSchemaCompatibility;
 import io.confluent.connect.storage.wal.WAL;
 
 public class TopicPartitionWriter {
+  // SBD Custom logic
+  private static final Pattern ID_FORMAT_PATTERN = Pattern.compile(
+      "(?<organisation>[a-z][a-z0-9-]*)."
+          + "(?<space>[a-z][a-z0-9-]*)"
+          + "(?:.(?<name>[a-z][a-z0-9._-]*))?");
   private static final Logger log = LoggerFactory.getLogger(TopicPartitionWriter.class);
   private static final TimestampExtractor WALLCLOCK =
       new TimeBasedPartitioner.WallclockTimestampExtractor();
@@ -880,7 +887,8 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws HiveMetaStoreException {
         try {
-          hive.createTable(hiveDatabase, tp.topic(), currentSchema, partitioner);
+          hive.createTable(hiveDatabase, mapTopicToHiveName(tp.topic()),
+              currentSchema, partitioner);
         } catch (Throwable e) {
           log.error("Creating Hive table threw unexpected error", e);
         }
@@ -895,7 +903,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws HiveMetaStoreException {
         try {
-          hive.alterSchema(hiveDatabase, tp.topic(), currentSchema);
+          hive.alterSchema(hiveDatabase, mapTopicToHiveName(tp.topic()), currentSchema);
         } catch (Throwable e) {
           log.error("Altering Hive schema threw unexpected error", e);
         }
@@ -910,7 +918,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws Exception {
         try {
-          hiveMetaStore.addPartition(hiveDatabase, tp.topic(), location);
+          hiveMetaStore.addPartition(hiveDatabase, mapTopicToHiveName(tp.topic()), location);
         } catch (Throwable e) {
           log.error("Adding Hive partition threw unexpected error", e);
         }
@@ -918,6 +926,20 @@ public class TopicPartitionWriter {
       }
     });
     hiveUpdateFutures.add(future);
+  }
+
+  private String mapTopicToHiveName(final String topic) {
+    String datacenter = (String) connectorConfig.originals().get("datacenter");
+    if (null != datacenter && !"zhh".equals(datacenter)) {
+      Matcher matcher = ID_FORMAT_PATTERN.matcher(topic);
+      if (matcher.matches()) {
+        return matcher.group("organisation")
+            + "." + datacenter
+            + "." + matcher.group("space")
+            + "." + matcher.group("name");
+      }
+    }
+    return topic;
   }
 
   private enum State {
