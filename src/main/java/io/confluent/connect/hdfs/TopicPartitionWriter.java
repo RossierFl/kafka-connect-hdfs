@@ -466,7 +466,8 @@ public class TopicPartitionWriter {
   public void close() throws ConnectException {
     log.debug("Closing TopicPartitionWriter {}", tp);
     List<Exception> exceptions = new ArrayList<>();
-    for (String encodedPartition : writers.keySet()) {
+    Set<String> partitionToClose = new HashSet<>(writers.keySet());
+    for (String encodedPartition : partitionToClose) {
       log.debug(
           "Discarding in progress tempfile {} for {} {}",
           tempFiles.get(encodedPartition),
