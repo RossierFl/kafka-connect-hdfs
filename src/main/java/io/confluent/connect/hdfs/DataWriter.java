@@ -393,8 +393,8 @@ public class DataWriter {
 
   public void syncWithHive() throws ConnectException {
     Set<String> topics = new HashSet<>();
-    for (TopicPartition tp : topicPartitionWriters.keySet()) {
-      topics.add(tp.topic());
+    for (TopicPartitionWriter tpWriter : topicPartitionWriters.values()) {
+      topics.add(tpWriter.mapTopicToDCTopicId(tpWriter.topicPartition().topic()));
     }
 
     try {

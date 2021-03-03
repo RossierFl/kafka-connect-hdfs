@@ -345,7 +345,8 @@ public class TopicPartitionWriter {
           case WRITE_PARTITION_PAUSED:
             if (currentSchema == null) {
               if (compatibility != StorageSchemaCompatibility.NONE && offset != -1) {
-                String topicDir = FileUtils.topicDirectory(url, topicsDir, tp.topic());
+                String topicDir = FileUtils.topicDirectory(url, topicsDir,
+                    mapTopicToDCTopicId(tp.topic()));
                 CommittedFileFilter filter = new TopicPartitionCommittedFileFilter(tp);
                 FileStatus fileStatusWithMaxOffset = FileUtils.fileStatusWithMaxOffset(
                     storage,
@@ -607,7 +608,7 @@ public class TopicPartitionWriter {
   }
 
   private void readOffset() throws ConnectException {
-    String path = FileUtils.topicDirectory(url, topicsDir, tp.topic());
+    String path = FileUtils.topicDirectory(url, topicsDir, mapTopicToDCTopicId(tp.topic()));
     CommittedFileFilter filter = new TopicPartitionCommittedFileFilter(tp);
     FileStatus fileStatusWithMaxOffset = FileUtils.fileStatusWithMaxOffset(
         storage,
@@ -888,7 +889,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws HiveMetaStoreException {
         try {
-          hive.createTable(hiveDatabase, mapTopicToHiveName(tp.topic()),
+          hive.createTable(hiveDatabase, mapTopicToDCTopicId(tp.topic()),
               currentSchema, partitioner);
         } catch (Throwable e) {
           log.error("Creating Hive table threw unexpected error", e);
@@ -904,7 +905,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws HiveMetaStoreException {
         try {
-          hive.alterSchema(hiveDatabase, mapTopicToHiveName(tp.topic()), currentSchema);
+          hive.alterSchema(hiveDatabase, mapTopicToDCTopicId(tp.topic()), currentSchema);
         } catch (Throwable e) {
           log.error("Altering Hive schema threw unexpected error", e);
         }
@@ -919,7 +920,7 @@ public class TopicPartitionWriter {
       @Override
       public Void call() throws Exception {
         try {
-          hiveMetaStore.addPartition(hiveDatabase, mapTopicToHiveName(tp.topic()), location);
+          hiveMetaStore.addPartition(hiveDatabase, mapTopicToDCTopicId(tp.topic()), location);
         } catch (Throwable e) {
           log.error("Adding Hive partition threw unexpected error", e);
         }
@@ -929,7 +930,7 @@ public class TopicPartitionWriter {
     hiveUpdateFutures.add(future);
   }
 
-  private String mapTopicToHiveName(final String topic) {
+  public String mapTopicToDCTopicId(final String topic) {
     String datacenter = (String) connectorConfig.originals().get("datacenter");
     if (null != datacenter && !"zhh".equals(datacenter)) {
       Matcher matcher = ID_FORMAT_PATTERN.matcher(topic);
