@@ -452,6 +452,25 @@ public class DataWriter {
       topicPartitionWriters.put(tp, topicPartitionWriter);
     }
 
+    topicDirs = new HashMap<>();
+    for (TopicPartition tp : context.assignment()) {
+      topicDirs.computeIfAbsent(tp.topic(), top -> connectorConfig.getTopicsDirFromTopic(top));
+    }
+
+    for (String directory : topicDirs.values()) {
+      createDir(directory);
+      createDir(directory + HdfsSinkConnectorConstants.TEMPFILE_DIRECTORY);
+    }
+
+    logDirs = new HashMap<>();
+    for (TopicPartition tp : context.assignment()) {
+      logDirs.computeIfAbsent(tp.topic(), topic -> connectorConfig.getLogsDirFromTopic(topic));
+    }
+
+    for (String directory : logDirs.values()) {
+      createDir(directory);
+    }
+
     if (hiveIntegration) {
       syncWithHive();
     }
